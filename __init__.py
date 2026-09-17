@@ -42,12 +42,11 @@ _active_fetchers = set()
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Ограничитель частоты запросов (защита от HTTP 429)
-#  Работает внутри потока _AsyncFetcher._worker, не требует event loop
 # ═══════════════════════════════════════════════════════════════════════
 
 _rate_lock = threading.Lock()
 _last_request_time = 0.0
-_REQUEST_INTERVAL = 0.3  # секунд между запросами
+_REQUEST_INTERVAL = 0.3
 
 
 def _wait_for_rate_limit():
@@ -82,7 +81,6 @@ class _AsyncFetcher(QObject):
 
     def _worker(self):
         try:
-            # Троттлинг: ждём, пока не пройдёт достаточно времени
             _wait_for_rate_limit()
 
             if self._is_json:
@@ -139,16 +137,6 @@ class _AsyncFetcher(QObject):
 def _fetch_json_async(url, on_success, on_error, timeout=15):
     fetcher = _AsyncFetcher(
         url, is_json=True, timeout=timeout,
-        on_success=on_success, on_error=on_error,
-    )
-    _active_fetchers.add(fetcher)
-    fetcher.start()
-    return fetcher
-
-
-def _fetch_bytes_async(url, on_success, on_error, timeout=30):
-    fetcher = _AsyncFetcher(
-        url, is_json=False, timeout=timeout,
         on_success=on_success, on_error=on_error,
     )
     _active_fetchers.add(fetcher)
@@ -478,29 +466,16 @@ class YandexMusicCoverProvider(CoverArtProvider):
                 self.api.logger.info(
                     f"Yandex Music: обложка найдена — {cover_url}"
                 )
-                _fetch_bytes_async(
-                    cover_url,
-                    on_success=self._handle_cover_download,
-                    on_error=self._handle_cover_error,
-                )
-            else:
-                self.next_in_queue()
+                # ИСПРАВЛЕНО: передаём URL строки в CoverArtImage,
+                # Picard сам скачает изображение через свой web service.
+                # Раньше передавали bytes, что ломало QUrl конструктор.
+                self.queue_put(CoverArtImage(cover_url))
+            self.next_in_queue()
 
         except Exception as e:
             self.api.logger.error(
                 f"Yandex Music: ошибка обработки обложки — {e}"
             )
-            self.next_in_queue()
-
-    def _handle_cover_download(self, image_bytes):
-        try:
-            if image_bytes:
-                self.queue_put(CoverArtImage(image_bytes))
-        except Exception as e:
-            self.api.logger.error(
-                f"Yandex Music: ошибка добавления обложки — {e}"
-            )
-        finally:
             self.next_in_queue()
 
     def _handle_cover_error(self, error):
@@ -585,4 +560,4 @@ def enable(api):
     api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    api.logger.info("Yandex Music Metadata plugin v0.13 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.14 loaded")
