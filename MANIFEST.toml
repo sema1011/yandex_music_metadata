@@ -1,14 +1,14 @@
-uuid = "b8c1c32e-2f5b-45e7-91fc-9f376c0d88b2"
+uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 name = "Yandex Music Metadata"
-description = "Fetches additional metadata (lyrics, genre, explicit flag) from Yandex Music."
+description = "Fetches metadata, lyrics and cover art from Yandex Music. Supports ISRC-based matching."
 api = ["3.0"]
-version = "0.1.0"
+version = "0.2.0"
 author = "Your Name"
 license = "GPL-2.0-or-later"
 license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
-categories = ["metadata"]
+categories = ["metadata", "coverart"]
 long_description = """
 Fetches supplementary metadata from Yandex Music and adds it to track tags.
-Supports: lyrics, genre, explicit flag. Requires a Yandex Music token
-for full functionality (texts, high-res covers).
+Supports: lyrics, genre, explicit flag, cover art.
+Can search by ISRC (preferred) or by artist + title.
 """
