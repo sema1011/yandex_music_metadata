@@ -413,7 +413,7 @@ class YandexMusicCoverProvider(CoverArtProvider):
             on_error=self._handle_cover_error,
         )
 
-        return CoverArtProvider.WAIT
+        return 1
 
     def _handle_cover_search(self, isrc, data):
         try:
