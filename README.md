@@ -29,8 +29,7 @@
     *   **Windows**: `%APPDATA%\MusicBrainz Picard\plugins`
     *   **macOS**: `~/Library/Application Support/MusicBrainz Picard/plugins`
     *   **Linux**: `~/.config/MusicBrainz Picard/plugins`
-3.  **ВАЖНО:** Убедитесь, что в папке `yandex_music` лежит файл `icon.png` (128×128 пикселей). Без него иконка плагина не отобразится.
-4.  Перезапустите Picard. Плагин появится в списке (`Инструменты → Плагины`).
+3.  Перезапустите Picard. Плагин появится в списке (`Инструменты → Плагины`).
 
 ## Настройка
 
