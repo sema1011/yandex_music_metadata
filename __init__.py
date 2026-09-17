@@ -29,8 +29,6 @@ YANDEX_HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
     "Accept-Encoding": "identity",
-    # api.music.yandex.net не требует Referer, но X-Retpath-Yaml помогает
-    "X-Retpath-Yaml": "https://music.yandex.ru/",
 }
 
 
@@ -46,8 +44,6 @@ _active_fetchers = set()
 # ═══════════════════════════════════════════════════════════════════════
 
 class _AsyncFetcher(QObject):
-    """QObject с сигналом для межпоточного обмена."""
-
     fetched = pyqtSignal(object, object)
 
     def __init__(self, url, is_json=True, timeout=15, on_success=None, on_error=None):
@@ -150,10 +146,11 @@ def _format_isrc(isrc):
 
 
 def _build_search_url(query, search_type="track"):
-    """ИСХОДНЫЙ ИЗМЕНЁН: используется api.music.yandex.net вместо music.yandex.ru.
+    """URL для поиска через api.music.yandex.net.
 
-    Типы: track, artist, album, playlist, video, user, podcast, podcast_episode.
-    API возвращает JSON, в отличие от старого handlers/search.jsx.
+    Путь: /api/search (с префиксом /api).
+    Тип: единственное число (track, album, artist).
+    Ответ обёрнут в поле 'result'.
     """
     params = urlencode({
         "text": query,
@@ -161,13 +158,20 @@ def _build_search_url(query, search_type="track"):
         "page": 0,
         "nocorrect": "false",
     })
-    return f"https://api.music.yandex.net/search?{params}"
+    return f"https://api.music.yandex.net/api/search?{params}"
 
 
 def _build_cover_url(cover_uri, size="1000x1000"):
     if not cover_uri:
         return None
     return f"https://{cover_uri.replace('%%', size)}"
+
+
+def _extract_result(data):
+    """API Яндекс Музыки оборачивает результат в поле 'result'."""
+    if not data:
+        return {}
+    return data.get("result", data)
 
 
 def _match_track(track_data, artist, title):
@@ -226,7 +230,8 @@ def _handle_track_search_result(api, album, metadata, task_id, artist, title,
         if not data:
             return
 
-        tracks = data.get("tracks", {}).get("results", [])
+        result = _extract_result(data)
+        tracks = result.get("tracks", {}).get("results", [])
         if not tracks:
             api.logger.debug(
                 f"Yandex Music: ничего не найдено для "
@@ -314,7 +319,6 @@ def process_track(api, track, metadata, track_node, release_node=None):
         timeout=15.0,
     )
 
-    # ИСХОДНЫЙ ИЗМЕНЁН: type=track (единственное число для API)
     url = _build_search_url(search_query, "track")
     isrc_for_handler = formatted_isrc if (use_isrc and formatted_isrc) else ""
 
@@ -377,7 +381,6 @@ class YandexMusicCoverProvider(CoverArtProvider):
             search_query = f"{album_artist} {album_title}"
             search_type = "album"
 
-        # ИСХОДНЫЙ ИЗМЕНЁН: api.music.yandex.net, type=album (ед.ч.)
         url = _build_search_url(search_query, search_type)
         self.api.logger.debug(
             f"Yandex Music: поиск обложки для «{search_query}» "
@@ -396,6 +399,8 @@ class YandexMusicCoverProvider(CoverArtProvider):
                 self.next_in_queue()
                 return
 
+            result = _extract_result(data)
+
             album_artist = (
                 self.metadata.get("albumartist", "")
                 or self.metadata.get("artist", "")
@@ -405,7 +410,7 @@ class YandexMusicCoverProvider(CoverArtProvider):
             matched_album = None
 
             if isrc:
-                tracks = data.get("tracks", {}).get("results", [])
+                tracks = result.get("tracks", {}).get("results", [])
                 for track_data in tracks:
                     track_albums = track_data.get("albums", [])
                     if track_albums:
@@ -417,14 +422,14 @@ class YandexMusicCoverProvider(CoverArtProvider):
                             matched_album = track_albums[0]
                         break
             else:
-                albums = data.get("albums", {}).get("results", [])
+                albums = result.get("albums", {}).get("results", [])
                 for album_data in albums:
                     if _match_album(album_data, album_artist, album_title):
                         matched_album = album_data
                         break
 
                 if not matched_album:
-                    tracks = data.get("tracks", {}).get("results", [])
+                    tracks = result.get("tracks", {}).get("results", [])
                     for track_data in tracks:
                         for ta in track_data.get("albums", []):
                             if _match_album(ta, album_artist, album_title):
@@ -558,4 +563,4 @@ def enable(api):
     api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    api.logger.info("Yandex Music Metadata plugin v0.8 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.9 loaded")
