@@ -148,8 +148,7 @@ def _format_isrc(isrc):
 def _build_search_url(query, search_type="track"):
     """URL для поиска через api.music.yandex.net.
 
-    Путь: /api/search (с префиксом /api).
-    Тип: единственное число (track, album, artist).
+    ВАЖНО: путь /search (БЕЗ префикса /api).
     Ответ обёрнут в поле 'result'.
     """
     params = urlencode({
@@ -158,7 +157,7 @@ def _build_search_url(query, search_type="track"):
         "page": 0,
         "nocorrect": "false",
     })
-    return f"https://api.music.yandex.net/api/search?{params}"
+    return f"https://api.music.yandex.net/search?{params}"
 
 
 def _build_cover_url(cover_uri, size="1000x1000"):
