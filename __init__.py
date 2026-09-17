@@ -1,5 +1,7 @@
 import json
 import threading
+import time
+import queue
 import urllib.request
 from functools import partial
 from urllib.parse import urlencode
@@ -37,6 +39,39 @@ YANDEX_HEADERS = {
 # ═══════════════════════════════════════════════════════════════════════
 
 _active_fetchers = set()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Ограничитель частоты запросов (защита от HTTP 429)
+# ═══════════════════════════════════════════════════════════════════════
+
+_request_queue = queue.Queue()
+_rate_limiter_started = False
+_rate_lock = threading.Lock()
+_REQUEST_INTERVAL = 0.25  # секунд между запросами
+
+
+def _ensure_rate_limiter():
+    global _rate_limiter_started
+    with _rate_lock:
+        if _rate_limiter_started:
+            return
+        _rate_limiter_started = True
+        threading.Thread(target=_rate_limiter_loop, daemon=True).start()
+
+
+def _rate_limiter_loop():
+    while True:
+        url, is_json, timeout, on_success, on_error = _request_queue.get()
+        if url is None:
+            break
+        fetcher = _AsyncFetcher(
+            url, is_json=is_json, timeout=timeout,
+            on_success=on_success, on_error=on_error,
+        )
+        _active_fetchers.add(fetcher)
+        fetcher.start()
+        time.sleep(_REQUEST_INTERVAL)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -112,23 +147,13 @@ class _AsyncFetcher(QObject):
 
 
 def _fetch_json_async(url, on_success, on_error, timeout=15):
-    fetcher = _AsyncFetcher(
-        url, is_json=True, timeout=timeout,
-        on_success=on_success, on_error=on_error,
-    )
-    _active_fetchers.add(fetcher)
-    fetcher.start()
-    return fetcher
+    _ensure_rate_limiter()
+    _request_queue.put((url, True, timeout, on_success, on_error))
 
 
 def _fetch_bytes_async(url, on_success, on_error, timeout=30):
-    fetcher = _AsyncFetcher(
-        url, is_json=False, timeout=timeout,
-        on_success=on_success, on_error=on_error,
-    )
-    _active_fetchers.add(fetcher)
-    fetcher.start()
-    return fetcher
+    _ensure_rate_limiter()
+    _request_queue.put((url, False, timeout, on_success, on_error))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -136,7 +161,9 @@ def _fetch_bytes_async(url, on_success, on_error, timeout=30):
 # ═══════════════════════════════════════════════════════════════════════
 
 def _normalize(s):
-    return s.lower().strip() if s else ""
+    if not s:
+        return ""
+    return s.lower().strip().replace("ё", "е")
 
 
 def _format_isrc(isrc):
@@ -146,11 +173,6 @@ def _format_isrc(isrc):
 
 
 def _build_search_url(query, search_type="track"):
-    """URL для поиска через api.music.yandex.net.
-
-    ВАЖНО: путь /search (БЕЗ префикса /api).
-    Ответ обёрнут в поле 'result'.
-    """
     params = urlencode({
         "text": query,
         "type": search_type,
@@ -167,7 +189,6 @@ def _build_cover_url(cover_uri, size="1000x1000"):
 
 
 def _extract_result(data):
-    """API Яндекс Музыки оборачивает результат в поле 'result'."""
     if not data:
         return {}
     return data.get("result", data)
@@ -392,6 +413,8 @@ class YandexMusicCoverProvider(CoverArtProvider):
             on_error=self._handle_cover_error,
         )
 
+        return CoverArtProvider.WAIT
+
     def _handle_cover_search(self, isrc, data):
         try:
             if not data:
@@ -562,4 +585,4 @@ def enable(api):
     api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    api.logger.info("Yandex Music Metadata plugin v0.9 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.10 loaded")
