@@ -3,7 +3,7 @@
 
 uuid = "128e4018-df34-4d4a-bf29-58e5b21da8fe"
 name = "Yandex Music"
-version = "1.0.0"
+version = "1.0.1"
 description = "Получает метаданные треков (жанр, explicit, тексты) и обложки альбомов из Яндекс Музыки."
 api = ["3.0"]
 

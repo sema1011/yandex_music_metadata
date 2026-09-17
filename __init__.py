@@ -19,7 +19,7 @@ from picard.plugin3.api import (
 
 # ── Заголовки для запросов к API Яндекс Музыки ──────────────────────────
 
-_HEADERS = {
+_BASE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -28,6 +28,14 @@ _HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
     "Accept-Encoding": "identity",
 }
+
+
+def _build_headers(token=""):
+    """Собрать заголовки с опциональным OAuth-токеном."""
+    headers = dict(_BASE_HEADERS)
+    if token:
+        headers["Authorization"] = f"OAuth {token}"
+    return headers
 
 # ── Rate limiter (защита от HTTP 429) ───────────────────────────────────
 
@@ -48,9 +56,9 @@ def _wait_for_rate_limit():
 
 # ── Синхронный HTTP (для обложек) ───────────────────────────────────────
 
-def _fetch_json_sync(url, timeout=10):
+def _fetch_json_sync(url, timeout=10, token=""):
     _wait_for_rate_limit()
-    req = urllib.request.Request(url, headers=_HEADERS)
+    req = urllib.request.Request(url, headers=_build_headers(token))
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read()
     text = raw.decode("utf-8", errors="replace")
@@ -65,12 +73,13 @@ _active_fetchers = set()
 class _AsyncFetcher(QObject):
     fetched = pyqtSignal(object, object)
 
-    def __init__(self, url, timeout=15, on_success=None, on_error=None):
+    def __init__(self, url, timeout=15, on_success=None, on_error=None, token=""):
         super().__init__()
         self._url = url
         self._timeout = timeout
         self._on_success = on_success
         self._on_error = on_error
+        self._token = token
         self.fetched.connect(self._dispatch)
 
     def start(self):
@@ -79,7 +88,7 @@ class _AsyncFetcher(QObject):
     def _worker(self):
         try:
             _wait_for_rate_limit()
-            req = urllib.request.Request(self._url, headers=_HEADERS)
+            req = urllib.request.Request(self._url, headers=_build_headers(self._token))
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 raw = resp.read()
             text = raw.decode("utf-8", errors="replace")
@@ -104,9 +113,10 @@ class _AsyncFetcher(QObject):
             _active_fetchers.discard(self)
 
 
-def _fetch_json_async(url, on_success, on_error, timeout=15):
+def _fetch_json_async(url, on_success, on_error, timeout=15, token=""):
     fetcher = _AsyncFetcher(url, timeout=timeout,
-                            on_success=on_success, on_error=on_error)
+                            on_success=on_success, on_error=on_error,
+                            token=token)
     _active_fetchers.add(fetcher)
     fetcher.start()
 
@@ -268,6 +278,7 @@ def process_track(api, track, metadata, track_node, release_node=None):
 
     use_isrc = _cfg(api, "use_isrc", True)
     isrc = _format_isrc(metadata.get("isrc", "")) if use_isrc else ""
+    token = _cfg(api, "token", "")
 
     if isrc:
         query, label = isrc, f"ISRC:{isrc}"
@@ -282,6 +293,7 @@ def process_track(api, track, metadata, track_node, release_node=None):
         on_success=partial(_handle_track_result, api, track.album,
                             metadata, task_id, artist, title, isrc),
         on_error=partial(_handle_track_error, api, track.album, task_id),
+        token=token,
     )
 
 
@@ -315,8 +327,10 @@ class YandexMusicCoverProvider(CoverArtProvider):
 
         self.api.logger.debug(f"Yandex Music: поиск обложки «{query}» ({search_type})")
 
+        token = _cfg(self.api, "token", "")
+
         try:
-            data = _fetch_json_sync(_build_search_url(query, search_type))
+            data = _fetch_json_sync(_build_search_url(query, search_type), token=token)
         except Exception as e:
             self.api.logger.error(f"Yandex Music: ошибка поиска обложки — {e}")
             return 0
