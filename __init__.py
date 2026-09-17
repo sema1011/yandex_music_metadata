@@ -48,10 +48,13 @@ def _match_track(track_data, artist, title):
         return False
     found_title = _normalize(track_data.get("title", ""))
     target_title = _normalize(title)
+    # Простая проверка вхождения для гибкости
     if target_title not in found_title and found_title not in target_title:
         return False
+    
     found_artists = [_normalize(a.get("name", "")) for a in track_data.get("artists", [])]
     target_artist = _normalize(artist)
+    
     return any(target_artist in fa or fa in target_artist for fa in found_artists)
 
 
@@ -61,10 +64,13 @@ def _match_album(album_data, album_artist, album_title):
         return False
     found_title = _normalize(album_data.get("title", ""))
     target_title = _normalize(album_title)
+    
     if target_title not in found_title and found_title not in target_title:
         return False
+    
     found_artists = [_normalize(a.get("name", "")) for a in album_data.get("artists", [])]
     target_artist = _normalize(album_artist)
+    
     return any(target_artist in fa or fa in target_artist for fa in found_artists)
 
 
@@ -105,6 +111,7 @@ def _handle_track_search(api, album, metadata, task_id, artist, title, isrc,
 
         matched = None
         if isrc:
+            # Если есть ISRC, берем первый результат как наиболее релевантный
             matched = tracks
         else:
             for track_data in tracks:
@@ -117,7 +124,7 @@ def _handle_track_search(api, album, metadata, task_id, artist, title, isrc,
 
         album_data = (matched.get("albums") or [{}])
 
-        # --- ИСПРАВЛЕНО: Доступ к config через ["key"] ---
+        # --- ИСПРАВЛЕНО: Доступ к config через ["key"] с обработкой KeyError ---
         try:
             fetch_genre = api.plugin_config["fetch_genre"]
         except KeyError:
@@ -194,6 +201,8 @@ def process_track(api, track, metadata, track_node, release_node=None):
         search_label = f"{artist} — {title}"
 
     task_id = f"ya_track_{search_label}"
+    
+    # Регистрируем задачу в очереди альбома
     api.add_album_task(
         track.album, task_id,
         f"Yandex Music: поиск {search_label}",
@@ -202,7 +211,10 @@ def process_track(api, track, metadata, track_node, release_node=None):
 
     url = _build_search_url(search_query, "tracks")
 
-    request = api.web_service.get_url(
+    # ИСПРАВЛЕНИЕ: Убран set_album_task_request.
+    # В Picard 3.x достаточно вызвать web_service.get_url.
+    # Picard автоматически свяжет этот запрос с задачей task_id, созданной выше.
+    api.web_service.get_url(
         url=url,
         handler=partial(
             _handle_track_search,
@@ -213,7 +225,6 @@ def process_track(api, track, metadata, track_node, release_node=None):
         priority=True,
         important=False,
     )
-    api.set_album_task_request(track.album, task_id, request)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -289,6 +300,7 @@ class YandexMusicCoverProvider(CoverArtProvider):
             f"(тип: {search_type})"
         )
 
+        # Для CoverArtProvider запросы ставятся в очередь автоматически через queue_put внутри хендлера
         self.api.web_service.get_url(
             url=url,
             handler=partial(self._handle_cover_search, formatted_isrc),
@@ -415,6 +427,7 @@ class YandexMusicOptionsPage(OptionsPage):
         except KeyError:
             self.enabled_cb.setChecked(True)
             
+        # Для токена используем .get(), так как это строковое значение, а не флаг
         self.token_input.setText(self.api.plugin_config.get("token", ""))
         
         try:
@@ -458,6 +471,7 @@ class YandexMusicOptionsPage(OptionsPage):
 
 def enable(api):
     # --- ИСПРАВЛЕНО: Регистрация всех опций обязательна для Picard 3.x ---
+    # Без этого plugin_config не будет содержать ключей, и возникнет KeyError
     api.plugin_config.register_option("enabled", True)
     api.plugin_config.register_option("token", "")
     api.plugin_config.register_option("use_isrc", True)
@@ -468,6 +482,8 @@ def enable(api):
 
     api.register_options_page(YandexMusicOptionsPage)
     api.register_cover_art_provider(YandexMusicCoverProvider)
+    
+    # Приоритет -50 означает, что плагин сработает после основных процессоров Picard
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    api.logger.info("Yandex Music Metadata plugin v0.3 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.3 loaded successfully")
