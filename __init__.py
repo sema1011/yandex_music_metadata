@@ -231,7 +231,7 @@ def _cfg(api, key, default):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Обработчик треков (асинхронный — работает)
+#  Обработчик треков (асинхронный)
 # ═══════════════════════════════════════════════════════════════════════
 
 def _handle_track_search_result(api, album, metadata, task_id, artist, title,
@@ -368,7 +368,7 @@ class YandexMusicCoverProvider(CoverArtProvider):
         album_title = self.metadata.get("album", "")
 
         if not album_artist or not album_title:
-            return CoverArtProvider.FINISHED
+            return 0
 
         formatted_isrc = ""
         use_isrc = _cfg(self.api, "use_isrc", True)
@@ -394,20 +394,16 @@ class YandexMusicCoverProvider(CoverArtProvider):
             f"(тип: {search_type})"
         )
 
-        # СИНХРОННЫЙ запрос — как в Amazon-плагине.
-        # Блокирует главный поток на ~300мс, но гарантирует,
-        # что queue_put и return FINISHED отработают до
-        # уничтожения _queue_generator.
         try:
             data = _fetch_json_sync(url, timeout=10)
         except Exception as e:
             self.api.logger.error(
                 f"Yandex Music: ошибка поиска обложки — {e}"
             )
-            return CoverArtProvider.FINISHED
+            return 0
 
         if not data:
-            return CoverArtProvider.FINISHED
+            return 0
 
         result = _extract_result(data)
 
@@ -447,11 +443,11 @@ class YandexMusicCoverProvider(CoverArtProvider):
                 f"Yandex Music: альбом не найден для "
                 f"«{album_artist} — {album_title}»"
             )
-            return CoverArtProvider.FINISHED
+            return 0
 
         cover_uri = _extract_cover_uri(matched_album)
         if not cover_uri:
-            return CoverArtProvider.FINISHED
+            return 0
 
         cover_url = _build_cover_url(cover_uri, "1000x1000")
         if cover_url:
@@ -460,7 +456,7 @@ class YandexMusicCoverProvider(CoverArtProvider):
             )
             self.queue_put(CoverArtImage(cover_url))
 
-        return CoverArtProvider.FINISHED
+        return 0
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -536,4 +532,4 @@ def enable(api):
     api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    api.logger.info("Yandex Music Metadata plugin v0.16 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.17 loaded")
