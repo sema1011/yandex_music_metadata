@@ -4,7 +4,7 @@ import urllib.request
 from functools import partial
 from urllib.parse import urlencode
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QLabel, QLineEdit, QVBoxLayout,
 )
@@ -34,42 +34,87 @@ YANDEX_HEADERS = {
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Асинхронный HTTP-клиент на urllib (без внешних зависимостей)
+#  Асинхронный HTTP-клиент на сигналах Qt (потокобезопасный)
 # ═══════════════════════════════════════════════════════════════════════
 
-def _fetch_json_async(url, on_success, on_error, timeout=15):
-    """Делает GET-запрос в фоновом потоке, возвращает JSON в главный поток."""
-    def worker():
+class _AsyncFetcher(QObject):
+    """QObject с сигналом для межпоточного обмена.
+    Создаётся в главном потоке, emit вызывается из фонового — Qt
+    автоматически маршалит сигнал в главный поток."""
+
+    fetched = pyqtSignal(object, object)  # (data_or_bytes, error_string_or_None)
+
+    def __init__(self, url, is_json=True, timeout=15, on_success=None, on_error=None):
+        super().__init__()
+        self._url = url
+        self._is_json = is_json
+        self._timeout = timeout
+        self._on_success = on_success
+        self._on_error = on_error
+        # Соединяем сигнал с обработчиком — вызов будет в главном потоке
+        self.fetched.connect(self._dispatch)
+
+    def start(self):
+        """Запускает фоновый поток."""
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _worker(self):
+        """Работает в фоновом потоке. Делает HTTP-запрос и эмитит сигнал."""
         try:
-            req = urllib.request.Request(url, headers=YANDEX_HEADERS)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read().decode("utf-8")
-                if not raw:
-                    QTimer.singleShot(0, lambda: on_error("Пустой ответ от сервера"))
-                    return
-                data = json.loads(raw)
-                QTimer.singleShot(0, lambda: on_success(data))
+            if self._is_json:
+                req = urllib.request.Request(self._url, headers=YANDEX_HEADERS)
+            else:
+                req = urllib.request.Request(self._url, headers={
+                    "User-Agent": YANDEX_HEADERS["User-Agent"],
+                    "Accept": "image/*",
+                })
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                raw = resp.read()
+                if self._is_json:
+                    text = raw.decode("utf-8")
+                    if not text:
+                        self.fetched.emit(None, "Пустой ответ от сервера")
+                        return
+                    data = json.loads(text)
+                    self.fetched.emit(data, None)
+                else:
+                    if not raw:
+                        self.fetched.emit(None, "Пустые данные обложки")
+                        return
+                    self.fetched.emit(raw, None)
         except json.JSONDecodeError as e:
-            QTimer.singleShot(0, lambda: on_error(f"Ошибка JSON: {e}"))
+            self.fetched.emit(None, f"Ошибка JSON: {e}")
         except Exception as e:
-            QTimer.singleShot(0, lambda: on_error(str(e)))
-    threading.Thread(target=worker, daemon=True).start()
+            self.fetched.emit(None, str(e))
+
+    def _dispatch(self, data, error):
+        """Вызывается в главном потоке (через signal-slot механизм Qt)."""
+        if error is not None:
+            if self._on_error:
+                self._on_error(error)
+        else:
+            if self._on_success:
+                self._on_success(data)
+
+
+def _fetch_json_async(url, on_success, on_error, timeout=15):
+    """Создаёт AsyncFetcher для JSON-запроса и запускает его."""
+    fetcher = _AsyncFetcher(
+        url, is_json=True, timeout=timeout,
+        on_success=on_success, on_error=on_error,
+    )
+    fetcher.start()
+    return fetcher
 
 
 def _fetch_bytes_async(url, on_success, on_error, timeout=30):
-    """Делает GET-запрос в фоновом потоке, возвращает байты в главный поток."""
-    def worker():
-        try:
-            req = urllib.request.Request(url, headers={
-                "User-Agent": YANDEX_HEADERS["User-Agent"],
-                "Accept": "image/*",
-            })
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = resp.read()
-                QTimer.singleShot(0, lambda: on_success(data))
-        except Exception as e:
-            QTimer.singleShot(0, lambda: on_error(str(e)))
-    threading.Thread(target=worker, daemon=True).start()
+    """Создаёт AsyncFetcher для бинарного запроса и запускает его."""
+    fetcher = _AsyncFetcher(
+        url, is_json=False, timeout=timeout,
+        on_success=on_success, on_error=on_error,
+    )
+    fetcher.start()
+    return fetcher
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -132,7 +177,6 @@ def _extract_cover_uri(album_data):
 
 
 def _cfg(api, key, default):
-    """Безопасное чтение из plugin_config."""
     try:
         return api.plugin_config[key]
     except KeyError:
@@ -145,7 +189,6 @@ def _cfg(api, key, default):
 
 def _handle_track_search_result(api, album, metadata, task_id, artist, title,
                                  isrc, data):
-    """Обрабатывает успешный ответ поиска трека (в главном потоке)."""
     try:
         if not data:
             return
@@ -204,7 +247,6 @@ def _handle_track_search_result(api, album, metadata, task_id, artist, title,
 
 
 def _handle_track_search_error(api, album, task_id, artist, title, error):
-    """Обрабатывает ошибку поиска трека (в главном потоке)."""
     try:
         api.logger.error(f"Yandex Music: ошибка поиска трека — {error}")
     finally:
@@ -212,7 +254,6 @@ def _handle_track_search_error(api, album, task_id, artist, title, error):
 
 
 def process_track(api, track, metadata, track_node, release_node=None):
-    """Процессор метаданных трека."""
     if not _cfg(api, "enabled", True):
         return
 
@@ -317,7 +358,6 @@ class YandexMusicCoverProvider(CoverArtProvider):
         )
 
     def _handle_cover_search(self, isrc, data):
-        """Обрабатывает успешный ответ поиска обложки (в главном потоке)."""
         try:
             if not data:
                 self.next_in_queue()
@@ -378,7 +418,6 @@ class YandexMusicCoverProvider(CoverArtProvider):
                 self.api.logger.info(
                     f"Yandex Music: обложка найдена — {cover_url}"
                 )
-                # Загружаем обложку асинхронно
                 _fetch_bytes_async(
                     cover_url,
                     on_success=self._handle_cover_download,
@@ -394,7 +433,6 @@ class YandexMusicCoverProvider(CoverArtProvider):
             self.next_in_queue()
 
     def _handle_cover_download(self, image_bytes):
-        """Помещает скачанную обложку в очередь (в главном потоке)."""
         try:
             if image_bytes:
                 self.queue_put(CoverArtImage(image_bytes))
@@ -406,7 +444,6 @@ class YandexMusicCoverProvider(CoverArtProvider):
             self.next_in_queue()
 
     def _handle_cover_error(self, error):
-        """Обрабатывает ошибку загрузки обложки (в главном потоке)."""
         try:
             self.api.logger.error(
                 f"Yandex Music: ошибка загрузки обложки — {error}"
@@ -488,4 +525,4 @@ def enable(api):
     api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    api.logger.info("Yandex Music Metadata plugin v0.4 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.5 loaded")
