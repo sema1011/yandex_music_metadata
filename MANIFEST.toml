@@ -1,0 +1,14 @@
+uuid = "b8c1c32e-2f5b-45e7-91fc-9f376c0d88b2"
+name = "Yandex Music Metadata"
+description = "Fetches additional metadata (lyrics, genre, explicit flag) from Yandex Music."
+api = ["3.0"]
+version = "0.1.0"
+author = "Your Name"
+license = "GPL-2.0-or-later"
+license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
+categories = ["metadata"]
+long_description = """
+Fetches supplementary metadata from Yandex Music and adds it to track tags.
+Supports: lyrics, genre, explicit flag. Requires a Yandex Music token
+for full functionality (texts, high-res covers).
+"""
