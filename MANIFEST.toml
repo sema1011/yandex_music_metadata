@@ -1,4 +1,4 @@
-uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+uuid = "b8c1c32e-2f5b-45e7-91fc-9f376c0d88b2"
 name = "Yandex Music Metadata"
 description = "Fetches metadata, lyrics and cover art from Yandex Music. Supports ISRC-based matching."
 api = ["3.0"]
