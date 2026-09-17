@@ -18,7 +18,7 @@ from picard.plugin3.api import (
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Заголовки для запросов к Яндекс Музыке
+#  Заголовки для запросов к API Яндекс Музыки
 # ═══════════════════════════════════════════════════════════════════════
 
 YANDEX_HEADERS = {
@@ -29,8 +29,8 @@ YANDEX_HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
     "Accept-Encoding": "identity",
-    "Referer": "https://music.yandex.ru/",
-    "X-Requested-With": "XMLHttpRequest",
+    # api.music.yandex.net не требует Referer, но X-Retpath-Yaml помогает
+    "X-Retpath-Yaml": "https://music.yandex.ru/",
 }
 
 
@@ -46,13 +46,9 @@ _active_fetchers = set()
 # ═══════════════════════════════════════════════════════════════════════
 
 class _AsyncFetcher(QObject):
-    """QObject с сигналом для межпоточного обмена.
+    """QObject с сигналом для межпоточного обмена."""
 
-    ВАЖНО: объект должен удерживаться сильной ссылкой (_active_fetchers),
-    иначе Python GC уничтожит его до того, как сигнал будет доставлен.
-    """
-
-    fetched = pyqtSignal(object, object)  # (data_or_bytes, error_or_None)
+    fetched = pyqtSignal(object, object)
 
     def __init__(self, url, is_json=True, timeout=15, on_success=None, on_error=None):
         super().__init__()
@@ -64,11 +60,9 @@ class _AsyncFetcher(QObject):
         self.fetched.connect(self._dispatch)
 
     def start(self):
-        """Запускает фоновый поток."""
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _worker(self):
-        """Работает в фоновом потоке. Делает HTTP-запрос и эмитит сигнал."""
         try:
             if self._is_json:
                 headers = YANDEX_HEADERS
@@ -110,7 +104,6 @@ class _AsyncFetcher(QObject):
             self.fetched.emit(None, f"{type(e).__name__}: {e}")
 
     def _dispatch(self, data, error):
-        """Вызывается в главном потоке (через signal-slot механизм Qt)."""
         try:
             if error is not None:
                 if self._on_error:
@@ -119,28 +112,25 @@ class _AsyncFetcher(QObject):
                 if self._on_success:
                     self._on_success(data)
         finally:
-            # Освобождаем ссылку — fetcher больше не нужен
             _active_fetchers.discard(self)
 
 
 def _fetch_json_async(url, on_success, on_error, timeout=15):
-    """Создаёт AsyncFetcher для JSON-запроса и запускает его."""
     fetcher = _AsyncFetcher(
         url, is_json=True, timeout=timeout,
         on_success=on_success, on_error=on_error,
     )
-    _active_fetchers.add(fetcher)  # Защита от GC
+    _active_fetchers.add(fetcher)
     fetcher.start()
     return fetcher
 
 
 def _fetch_bytes_async(url, on_success, on_error, timeout=30):
-    """Создаёт AsyncFetcher для бинарного запроса и запускает его."""
     fetcher = _AsyncFetcher(
         url, is_json=False, timeout=timeout,
         on_success=on_success, on_error=on_error,
     )
-    _active_fetchers.add(fetcher)  # Защита от GC
+    _active_fetchers.add(fetcher)
     fetcher.start()
     return fetcher
 
@@ -159,9 +149,19 @@ def _format_isrc(isrc):
     return isrc.replace("-", "").upper().strip()
 
 
-def _build_search_url(query, search_type="tracks"):
-    params = urlencode({"text": query, "type": search_type, "page": 0})
-    return f"https://music.yandex.ru/handlers/search.jsx?{params}"
+def _build_search_url(query, search_type="track"):
+    """ИСХОДНЫЙ ИЗМЕНЁН: используется api.music.yandex.net вместо music.yandex.ru.
+
+    Типы: track, artist, album, playlist, video, user, podcast, podcast_episode.
+    API возвращает JSON, в отличие от старого handlers/search.jsx.
+    """
+    params = urlencode({
+        "text": query,
+        "type": search_type,
+        "page": 0,
+        "nocorrect": "false",
+    })
+    return f"https://api.music.yandex.net/search?{params}"
 
 
 def _build_cover_url(cover_uri, size="1000x1000"):
@@ -197,6 +197,11 @@ def _match_album(album_data, album_artist, album_title):
 def _extract_cover_uri(album_data):
     if not album_data:
         return None
+    cover = album_data.get("cover")
+    if isinstance(cover, dict):
+        uri = cover.get("uri")
+        if uri:
+            return uri
     return (
         album_data.get("coverUri")
         or album_data.get("ogImage")
@@ -309,7 +314,8 @@ def process_track(api, track, metadata, track_node, release_node=None):
         timeout=15.0,
     )
 
-    url = _build_search_url(search_query, "tracks")
+    # ИСХОДНЫЙ ИЗМЕНЁН: type=track (единственное число для API)
+    url = _build_search_url(search_query, "track")
     isrc_for_handler = formatted_isrc if (use_isrc and formatted_isrc) else ""
 
     _fetch_json_async(
@@ -366,11 +372,12 @@ class YandexMusicCoverProvider(CoverArtProvider):
 
         if formatted_isrc:
             search_query = formatted_isrc
-            search_type = "tracks"
+            search_type = "track"
         else:
             search_query = f"{album_artist} {album_title}"
-            search_type = "albums"
+            search_type = "album"
 
+        # ИСХОДНЫЙ ИЗМЕНЁН: api.music.yandex.net, type=album (ед.ч.)
         url = _build_search_url(search_query, search_type)
         self.api.logger.debug(
             f"Yandex Music: поиск обложки для «{search_query}» "
@@ -551,4 +558,4 @@ def enable(api):
     api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    api.logger.info("Yandex Music Metadata plugin v0.7 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.8 loaded")
