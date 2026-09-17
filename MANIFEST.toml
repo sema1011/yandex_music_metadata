@@ -1,14 +1,30 @@
-uuid = "b8c1c32e-2f5b-45e7-91fc-9f376c0d88b2"
-name = "Yandex Music Metadata"
-description = "Fetches metadata, lyrics and cover art from Yandex Music. Supports ISRC-based matching."
-api = ["3.0"]
+# MANIFEST.toml
+# https://picard-docs.musicbrainz.org/en/extending/plugins.html
+
+uuid = "128e4018-df34-4d4a-bf29-58e5b21da8fe"
+name = "Yandex Music"
 version = "1.0.0"
-author = "Alice"
-license = "GPL-2.0-or-later"
-license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
-categories = ["metadata", "coverart"]
+description = "Получает метаданные треков (жанр, explicit, тексты) и обложки альбомов из Яндекс Музыки."
+api = ["3.0"]
+
+authors = ["sema1011"]
+license = "GPL-3.0-or-later"
+license_url = "https://www.gnu.org/licenses/gpl-3.0.html"
+
 long_description = """
-Fetches supplementary metadata from Yandex Music and adds it to track tags.
-Supports: lyrics, genre, explicit flag, cover art.
-Can search by ISRC (preferred) or by artist + title.
+Плагин для MusicBrainz Picard, дополняющий метаданные из открытого API Яндекс Музыки.
+
+Возможности:
+  - Поиск треков по ISRC или по названию (артист + заголовок)
+  - Загрузка жанра из каталога Яндекс Музыки
+  - Простановка метки explicit (18+)
+  - Загрузка текстов песен (требует OAuth-токен)
+  - Загрузка обложек альбомов в высоком разрешении (1000x1000)
+
+Поиск по ISRC включён по умолчанию — это даёт наиболее точные совпадения.
+Если ISRC отсутствует, плагин ищет по артисту и названию трека с нормализацией ё→е.
 """
+
+categories = ["metadata", "coverart"]
+min_python_version = "3.9"
+source_locale = "ru"

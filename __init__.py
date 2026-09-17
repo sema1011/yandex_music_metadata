@@ -363,7 +363,7 @@ class YandexMusicOptionsPage(OptionsPage):
 
         layout.addWidget(QLabel("Что загружать:"))
         self.fetch_lyrics_cb = QCheckBox("Тексты песен")
-        layout.fetch_genre_cb = QCheckBox("Жанр")
+        self.fetch_genre_cb = QCheckBox("Жанр")
         self.fetch_explicit_cb = QCheckBox("Метку explicit (18+)")
         self.fetch_covers_cb = QCheckBox("Обложки альбомов")
         for cb in (self.fetch_lyrics_cb, self.fetch_genre_cb,
