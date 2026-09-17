@@ -35,13 +35,24 @@ YANDEX_HEADERS = {
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Глобальное хранилище ссылок на активные fetcher'ы (защита от GC)
+# ═══════════════════════════════════════════════════════════════════════
+
+_active_fetchers = set()
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Асинхронный HTTP-клиент на сигналах Qt (потокобезопасный)
 # ═══════════════════════════════════════════════════════════════════════
 
 class _AsyncFetcher(QObject):
-    """QObject с сигналом для межпоточного обмена."""
+    """QObject с сигналом для межпоточного обмена.
 
-    fetched = pyqtSignal(object, object)
+    ВАЖНО: объект должен удерживаться сильной ссылкой (_active_fetchers),
+    иначе Python GC уничтожит его до того, как сигнал будет доставлен.
+    """
+
+    fetched = pyqtSignal(object, object)  # (data_or_bytes, error_or_None)
 
     def __init__(self, url, is_json=True, timeout=15, on_success=None, on_error=None):
         super().__init__()
@@ -53,9 +64,11 @@ class _AsyncFetcher(QObject):
         self.fetched.connect(self._dispatch)
 
     def start(self):
+        """Запускает фоновый поток."""
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _worker(self):
+        """Работает в фоновом потоке. Делает HTTP-запрос и эмитит сигнал."""
         try:
             if self._is_json:
                 headers = YANDEX_HEADERS
@@ -74,18 +87,15 @@ class _AsyncFetcher(QObject):
                 if self._is_json:
                     text = raw.decode("utf-8", errors="replace")
                     if not text.strip():
-                        self.fetched.emit(
-                            None,
-                            f"Пустой ответ (HTTP {status})"
-                        )
+                        self.fetched.emit(None, f"Пустой ответ (HTTP {status})")
                         return
                     try:
                         data = json.loads(text)
                     except json.JSONDecodeError as e:
-                        snippet = text[:200].replace("\n", "\\n")
+                        snippet = text[:300].replace("\n", "\\n")
                         self.fetched.emit(
                             None,
-                            f"Ошибка JSON: {e} | HTTP {status} | начало ответа: {snippet}"
+                            f"Ошибка JSON: {e} | HTTP {status} | ответ: {snippet}"
                         )
                         return
                     self.fetched.emit(data, None)
@@ -100,28 +110,37 @@ class _AsyncFetcher(QObject):
             self.fetched.emit(None, f"{type(e).__name__}: {e}")
 
     def _dispatch(self, data, error):
-        if error is not None:
-            if self._on_error:
-                self._on_error(error)
-        else:
-            if self._on_success:
-                self._on_success(data)
+        """Вызывается в главном потоке (через signal-slot механизм Qt)."""
+        try:
+            if error is not None:
+                if self._on_error:
+                    self._on_error(error)
+            else:
+                if self._on_success:
+                    self._on_success(data)
+        finally:
+            # Освобождаем ссылку — fetcher больше не нужен
+            _active_fetchers.discard(self)
 
 
 def _fetch_json_async(url, on_success, on_error, timeout=15):
+    """Создаёт AsyncFetcher для JSON-запроса и запускает его."""
     fetcher = _AsyncFetcher(
         url, is_json=True, timeout=timeout,
         on_success=on_success, on_error=on_error,
     )
+    _active_fetchers.add(fetcher)  # Защита от GC
     fetcher.start()
     return fetcher
 
 
 def _fetch_bytes_async(url, on_success, on_error, timeout=30):
+    """Создаёт AsyncFetcher для бинарного запроса и запускает его."""
     fetcher = _AsyncFetcher(
         url, is_json=False, timeout=timeout,
         on_success=on_success, on_error=on_error,
     )
+    _active_fetchers.add(fetcher)  # Защита от GC
     fetcher.start()
     return fetcher
 
@@ -532,4 +551,4 @@ def enable(api):
     api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    api.logger.info("Yandex Music Metadata plugin v0.6 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.7 loaded")
