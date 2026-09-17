@@ -1,7 +1,6 @@
 import json
 import threading
 import time
-import queue
 import urllib.request
 from functools import partial
 from urllib.parse import urlencode
@@ -43,35 +42,23 @@ _active_fetchers = set()
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Ограничитель частоты запросов (защита от HTTP 429)
+#  Работает внутри потока _AsyncFetcher._worker, не требует event loop
 # ═══════════════════════════════════════════════════════════════════════
 
-_request_queue = queue.Queue()
-_rate_limiter_started = False
 _rate_lock = threading.Lock()
-_REQUEST_INTERVAL = 0.25  # секунд между запросами
+_last_request_time = 0.0
+_REQUEST_INTERVAL = 0.3  # секунд между запросами
 
 
-def _ensure_rate_limiter():
-    global _rate_limiter_started
+def _wait_for_rate_limit():
+    global _last_request_time
     with _rate_lock:
-        if _rate_limiter_started:
-            return
-        _rate_limiter_started = True
-        threading.Thread(target=_rate_limiter_loop, daemon=True).start()
-
-
-def _rate_limiter_loop():
-    while True:
-        url, is_json, timeout, on_success, on_error = _request_queue.get()
-        if url is None:
-            break
-        fetcher = _AsyncFetcher(
-            url, is_json=is_json, timeout=timeout,
-            on_success=on_success, on_error=on_error,
-        )
-        _active_fetchers.add(fetcher)
-        fetcher.start()
-        time.sleep(_REQUEST_INTERVAL)
+        now = time.monotonic()
+        elapsed = now - _last_request_time
+        wait = _REQUEST_INTERVAL - elapsed
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_time = time.monotonic()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -95,6 +82,9 @@ class _AsyncFetcher(QObject):
 
     def _worker(self):
         try:
+            # Троттлинг: ждём, пока не пройдёт достаточно времени
+            _wait_for_rate_limit()
+
             if self._is_json:
                 headers = YANDEX_HEADERS
             else:
@@ -147,13 +137,23 @@ class _AsyncFetcher(QObject):
 
 
 def _fetch_json_async(url, on_success, on_error, timeout=15):
-    _ensure_rate_limiter()
-    _request_queue.put((url, True, timeout, on_success, on_error))
+    fetcher = _AsyncFetcher(
+        url, is_json=True, timeout=timeout,
+        on_success=on_success, on_error=on_error,
+    )
+    _active_fetchers.add(fetcher)
+    fetcher.start()
+    return fetcher
 
 
 def _fetch_bytes_async(url, on_success, on_error, timeout=30):
-    _ensure_rate_limiter()
-    _request_queue.put((url, False, timeout, on_success, on_error))
+    fetcher = _AsyncFetcher(
+        url, is_json=False, timeout=timeout,
+        on_success=on_success, on_error=on_error,
+    )
+    _active_fetchers.add(fetcher)
+    fetcher.start()
+    return fetcher
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -585,4 +585,4 @@ def enable(api):
     api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    api.logger.info("Yandex Music Metadata plugin v0.10 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.13 loaded")
