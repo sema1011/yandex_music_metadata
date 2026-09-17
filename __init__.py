@@ -1,6 +1,9 @@
 import json
+import logging
+import ssl
 import threading
 import time
+import urllib.error
 import urllib.request
 from functools import partial
 from urllib.parse import urlencode
@@ -16,6 +19,10 @@ from picard.plugin3.api import (
     OptionsPage,
     t_,
 )
+
+# ── Логгер плагина ──────────────────────────────────────────────────────
+
+log = logging.getLogger(__name__)
 
 # ── Заголовки для запросов к API Яндекс Музыки ──────────────────────────
 
@@ -70,18 +77,37 @@ def _record_rate_limit_hit():
         _last_429_time = time.monotonic()
 
 
+# ── SSL-контекст ────────────────────────────────────────────────────────
+
+_ssl_context = ssl.create_default_context()
+
+# ── Парсинг JSON с обработкой ошибок ────────────────────────────────────
+
+def _parse_json(text, url=""):
+    """Распарсить JSON с подробной ошибкой при неудаче."""
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        preview = text[:200].replace("\n", " ")
+        log.error(f"Yandex Music: некорректный JSON от {url}: {exc} — «{preview}…»")
+        return None
+
+
 # ── Синхронный HTTP (для обложек) ───────────────────────────────────────
 
 def _fetch_json_sync(url, timeout=10, token=""):
     _wait_for_rate_limit()
     req = urllib.request.Request(url, headers=_build_headers(token))
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context) as resp:
         if resp.status == 429:
             _record_rate_limit_hit()
             raise urllib.error.HTTPError(url, 429, "Rate limited", {}, None)
         raw = resp.read()
     text = raw.decode("utf-8", errors="replace")
-    return json.loads(text) if text.strip() else None
+    return _parse_json(text, url)
 
 
 # ── Асинхронный HTTP (для треков) ───────────────────────────────────────
@@ -109,17 +135,17 @@ class _AsyncFetcher(QObject):
         try:
             _wait_for_rate_limit()
             req = urllib.request.Request(self._url, headers=_build_headers(self._token))
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout, context=_ssl_context) as resp:
                 if resp.status == 429:
                     _record_rate_limit_hit()
                     self.fetched.emit(None, "HTTP 429: Rate limited")
                     return
                 raw = resp.read()
             text = raw.decode("utf-8", errors="replace")
-            if not text.strip():
-                self.fetched.emit(None, "Пустой ответ")
+            data = _parse_json(text, self._url)
+            if data is None:
+                self.fetched.emit(None, "Некорректный или пустой ответ")
                 return
-            data = json.loads(text)
             self.fetched.emit(data, None)
         except urllib.error.HTTPError as e:
             self.fetched.emit(None, f"HTTP {e.code}: {e.reason}")
@@ -223,23 +249,41 @@ def _cfg(api, key, default):
 # ── Поиск альбома в ответе API ──────────────────────────────────────────
 
 def _find_album(result, isrc, album_artist, album_title):
+    """Найти подходящий альбом, используя ISRC как фильтр точности.
+
+    Порядок поиска:
+      1. Если ISRC задан — ищем среди треков с совпадающим ISRC, затем
+         фильтруем по имени артиста и альбома.
+      2. Ищем напрямую в списке альбомов.
+      3. Ищем в альбомах треков из общего списка.
+
+    Возвращает первый найденный совпавший альбом или None.
+    Никогда не возвращает «первый попавшийся» альбом без совпадения имён.
+    """
+    # ── 1. Приоритетный поиск по ISRC ──────────────────────────────────
     if isrc:
         for track in result.get("tracks", {}).get("results", []):
-            albums = track.get("albums") or []
-            if not albums:
+            track_isrc = _format_isrc(track.get("isrc", ""))
+            if track_isrc != isrc:
                 continue
-            for a in albums:
-                if _match_album(a, album_artist, album_title):
-                    return a
-            return albums[0]
-    else:
-        for a in result.get("albums", {}).get("results", []):
-            if _match_album(a, album_artist, album_title):
-                return a
-        for track in result.get("tracks", {}).get("results", []):
+            # ISRC совпал — ищем альбом с совпадением имён
             for a in track.get("albums") or []:
                 if _match_album(a, album_artist, album_title):
                     return a
+            # ISRC совпал, но имя альбома не совпало — пропускаем,
+            # дальше сработают ветки 2 и 3
+
+    # ── 2. Прямой поиск по альбомам ────────────────────────────────────
+    for a in result.get("albums", {}).get("results", []):
+        if _match_album(a, album_artist, album_title):
+            return a
+
+    # ── 3. Поиск в альбомах треков ─────────────────────────────────────
+    for track in result.get("tracks", {}).get("results", []):
+        for a in track.get("albums") or []:
+            if _match_album(a, album_artist, album_title):
+                return a
+
     return None
 
 
@@ -255,12 +299,21 @@ def _handle_track_result(api, album, metadata, task_id, artist, title, isrc, dat
                 f"Yandex Music: не найдено — ISRC={isrc or '—'}, «{artist} — {title}»")
             return
 
-        matched = tracks[0] if isrc else None
+        # 1. Сначала ищем точное совпадение по ISRC.
+        matched = None
+        if isrc:
+            for t in tracks:
+                if _format_isrc(t.get("isrc", "")) == isrc:
+                    matched = t
+                    break
+
+        # 2. Если ISRC не помог — ищем по артисту и заголовку.
         if not matched:
             for t in tracks:
                 if _match_track(t, artist, title):
                     matched = t
                     break
+
         if not matched:
             api.logger.debug(f"Yandex Music: нет совпадения — «{artist} — {title}»")
             return
@@ -306,14 +359,13 @@ def process_track(api, track, metadata, track_node):
     if not title or not artist:
         return
 
+    # ISRC — фильтр точности, а не критерий поиска.
+    # Всегда ищем по артисту + заголовок, затем фильтруем по ISRC.
     use_isrc = _cfg(api, "use_isrc", True)
     isrc = _format_isrc(metadata.get("isrc", "")) if use_isrc else ""
     token = _cfg(api, "token", "")
-
-    if isrc:
-        query, label = isrc, f"ISRC:{isrc}"
-    else:
-        query, label = f"{artist} {title}", f"{artist} — {title}"
+    query = f"{artist} {title}"
+    label = f"{artist} — {title}"
 
     task_id = f"ya_track_{label}"
     api.add_album_task(track.album, task_id, f"Yandex Music: поиск {label}")
@@ -344,6 +396,7 @@ class YandexMusicCoverProvider(CoverArtProvider):
         if not album_artist or not album_title:
             return 0
 
+        # ISRC — фильтр точности, а не критерий поиска.
         isrc = ""
         if _cfg(self.api, "use_isrc", True):
             for track in self.album.tracks:
@@ -352,10 +405,10 @@ class YandexMusicCoverProvider(CoverArtProvider):
                     if isrc:
                         break
 
-        query = isrc if isrc else f"{album_artist} {album_title}"
-        search_type = "track" if isrc else "album"
+        query = f"{album_artist} {album_title}"
+        search_type = "album"
 
-        self.api.logger.debug(f"Yandex Music: поиск обложки «{query}» ({search_type})")
+        self.api.logger.debug(f"Yandex Music: поиск обложки «{query}» ({search_type}, ISRC={isrc or 'нет'})")
 
         token = _cfg(self.api, "token", "")
 
@@ -446,4 +499,4 @@ def enable(api):
     api.register_options_page(YandexMusicOptionsPage)
     api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
-    api.logger.info("Yandex Music Metadata plugin v1.0 loaded")
+    api.logger.info("Yandex Music Metadata plugin v1.1 loaded")
