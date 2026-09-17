@@ -30,18 +30,13 @@ def _format_isrc(isrc):
 
 
 def _build_search_url(query, search_type="tracks"):
-    """URL для поиска на Яндекс Музыке через публичный эндпоинт."""
+    """URL для поиска на Яндекс Музыке."""
     params = urlencode({"text": query, "type": search_type, "page": 0})
     return f"https://music.yandex.ru/handlers/search.jsx?{params}"
 
 
 def _build_cover_url(cover_uri, size="1000x1000"):
-    """Собирает полный URL обложки из coverUri Яндекса.
-
-    Яндекс отдаёт URI вида:
-        avatars.yandex.net/get-music-content/12345/abc.p.123/%%
-    Символы %% заменяются на размер, например 1000x1000.
-    """
+    """Собирает полный URL обложки из coverUri Яндекса."""
     if not cover_uri:
         return None
     return f"https://{cover_uri.replace('%%', size)}"
@@ -74,7 +69,7 @@ def _match_album(album_data, album_artist, album_title):
 
 
 def _extract_cover_uri(album_data):
-    """Достаёт URI обложки из данных альбома. Пробует несколько полей."""
+    """Достаёт URI обложки из данных альбома."""
     if not album_data:
         return None
     return (
@@ -108,11 +103,9 @@ def _handle_track_search(api, album, metadata, task_id, artist, title, isrc,
             )
             return
 
-        # Если искали по ISRC — берём первый результат.
-        # Иначе — ищем точное совпадение по названию и исполнителю.
         matched = None
         if isrc:
-            matched = tracks[0]
+            matched = tracks
         else:
             for track_data in tracks:
                 if _match_track(track_data, artist, title):
@@ -120,27 +113,36 @@ def _handle_track_search(api, album, metadata, task_id, artist, title, isrc,
                     break
 
         if not matched:
-            api.logger.debug(
-                f"Yandex Music: нет точного совпадения для «{artist} — {title}»"
-            )
             return
 
-        # Данные альбома из найденного трека
-        album_data = (matched.get("albums") or [{}])[0]
+        album_data = (matched.get("albums") or [{}])
 
-        # Жанр
-        if api.plugin_config.get("fetch_genre", True):
+        # --- ИСПРАВЛЕНО: Доступ к config через ["key"] ---
+        try:
+            fetch_genre = api.plugin_config["fetch_genre"]
+        except KeyError:
+            fetch_genre = True
+
+        if fetch_genre:
             genre = album_data.get("genre") or matched.get("genre")
             if genre:
                 metadata["yandex_genre"] = genre
 
-        # Метка explicit
-        if api.plugin_config.get("fetch_explicit", True):
+        try:
+            fetch_explicit = api.plugin_config["fetch_explicit"]
+        except KeyError:
+            fetch_explicit = True
+
+        if fetch_explicit:
             if matched.get("content_warning") == "explicit" or matched.get("explicit"):
                 metadata["yandex_explicit"] = "true"
 
-        # Текст песни
-        if api.plugin_config.get("fetch_lyrics", True):
+        try:
+            fetch_lyrics = api.plugin_config["fetch_lyrics"]
+        except KeyError:
+            fetch_lyrics = True
+
+        if fetch_lyrics:
             lyrics = matched.get("lyrics")
             if lyrics:
                 if isinstance(lyrics, dict):
@@ -160,8 +162,14 @@ def _handle_track_search(api, album, metadata, task_id, artist, title, isrc,
 
 
 def process_track(api, track, metadata, track_node, release_node=None):
-    """Процессор метаданных трека: ищет на Яндекс Музыке и дополняет теги."""
-    if not api.plugin_config.get("enabled", True):
+    """Процессор метаданных трека."""
+    # --- ИСПРАВЛЕНО: Проверка enabled через try/except ---
+    try:
+        enabled = api.plugin_config["enabled"]
+    except KeyError:
+        enabled = True
+
+    if not enabled:
         return
 
     title = metadata.get("title", "")
@@ -170,8 +178,11 @@ def process_track(api, track, metadata, track_node, release_node=None):
     if not title or not artist:
         return
 
-    # Определяем стратегию поиска
-    use_isrc = api.plugin_config.get("use_isrc", True)
+    try:
+        use_isrc = api.plugin_config["use_isrc"]
+    except KeyError:
+        use_isrc = True
+
     raw_isrc = metadata.get("isrc", "")
     formatted_isrc = _format_isrc(raw_isrc)
 
@@ -210,26 +221,38 @@ def process_track(api, track, metadata, track_node, release_node=None):
 # ═══════════════════════════════════════════════════════════════════════
 
 class YandexMusicCoverProvider(CoverArtProvider):
-    """Провайдер обложек из Яндекс Музыки.
-
-    Ищет альбом по ISRC (если есть) или по исполнителю + названию,
-    затем загружает обложку через coverUri.
-    """
+    """Провайдер обложек из Яндекс Музыки."""
 
     NAME = "Yandex Music"
     TITLE = t_("Yandex Music")
 
     def enabled(self):
-        """Провайдер активен, если включён в настройках
-        и обложка ещё не найдена другими провайдерами."""
-        if not self.api.plugin_config.get("enabled", True):
+        """Проверка активности провайдера."""
+        # --- ИСПРАВЛЕНО: Корректный доступ к ConfigSection ---
+        try:
+            enabled = self.api.plugin_config["enabled"]
+        except KeyError:
+            enabled = True
+
+        if not enabled:
             return False
-        if not self.api.plugin_config.get("fetch_covers", True):
+
+        try:
+            fetch_covers = self.api.plugin_config["fetch_cover"]
+        except KeyError:
+            fetch_covers = True
+
+        if not fetch_covers:
             return False
-        return super().enabled() and not self.coverart.front_image_found
+
+        # Не загружаем, если обложка уже найдена
+        if self.coverart.front_image_found:
+            return False
+
+        return True
 
     def queue_images(self):
-        """Запускает асинхронный поиск альбома на Яндекс Музыке."""
+        """Запускает асинхронный поиск альбома."""
         album_artist = (
             self.metadata.get("albumartist", "")
             or self.metadata.get("artist", "")
@@ -239,9 +262,12 @@ class YandexMusicCoverProvider(CoverArtProvider):
         if not album_artist or not album_title:
             return CoverArtProvider.FINISHED
 
-        # Пытаемся найти ISRC у первого трека альбома
         formatted_isrc = ""
-        use_isrc = self.api.plugin_config.get("use_isrc", True)
+        try:
+            use_isrc = self.api.plugin_config["use_isrc"]
+        except KeyError:
+            use_isrc = True
+
         if use_isrc:
             for track in self.album.tracks:
                 if track.metadata:
@@ -250,10 +276,9 @@ class YandexMusicCoverProvider(CoverArtProvider):
                     if formatted_isrc:
                         break
 
-        # Стратегия поиска
         if formatted_isrc:
             search_query = formatted_isrc
-            search_type = "tracks"  # ISRC ищет треки, из них достаём альбом
+            search_type = "tracks"
         else:
             search_query = f"{album_artist} {album_title}"
             search_type = "albums"
@@ -270,8 +295,6 @@ class YandexMusicCoverProvider(CoverArtProvider):
             priority=True,
             important=False,
         )
-        # Не возвращаем FINISHED — ждём асинхронный ответ,
-        # после чего вызовем self.next_in_queue().
 
     def _handle_cover_search(self, isrc, response, reply, error):
         """Callback: обрабатывает ответ поиска и ставит обложку в очередь."""
@@ -294,30 +317,25 @@ class YandexMusicCoverProvider(CoverArtProvider):
 
             matched_album = None
 
-            # Если искали по ISRC — берём альбом из первого найденного трека
             if isrc:
                 tracks = data.get("tracks", {}).get("results", [])
                 for track_data in tracks:
                     track_albums = track_data.get("albums", [])
                     if track_albums:
-                        # Проверяем совпадение альбома
                         for ta in track_albums:
                             if _match_album(ta, album_artist, album_title):
                                 matched_album = ta
                                 break
                         if not matched_album:
-                            # Берём первый альбом первого трека
-                            matched_album = track_albums[0]
+                            matched_album = track_albums
                         break
             else:
-                # Искали по названию альбома — берём из результатов albums
                 albums = data.get("albums", {}).get("results", [])
                 for album_data in albums:
                     if _match_album(album_data, album_artist, album_title):
                         matched_album = album_data
                         break
 
-                # Если не нашли в albums, пробуем в tracks → albums
                 if not matched_album:
                     tracks = data.get("tracks", {}).get("results", [])
                     for track_data in tracks:
@@ -329,18 +347,10 @@ class YandexMusicCoverProvider(CoverArtProvider):
                             break
 
             if not matched_album:
-                self.api.logger.debug(
-                    f"Yandex Music: альбом не найден для "
-                    f"«{album_artist} — {album_title}»"
-                )
                 return
 
             cover_uri = _extract_cover_uri(matched_album)
             if not cover_uri:
-                self.api.logger.debug(
-                    f"Yandex Music: у альбома «{matched_album.get('title', '?')}» "
-                    f"нет обложки"
-                )
                 return
 
             cover_url = _build_cover_url(cover_uri, "1000x1000")
@@ -375,7 +385,7 @@ class YandexMusicOptionsPage(OptionsPage):
         layout.addWidget(self.enabled_cb)
 
         layout.addWidget(QLabel(
-            "Токен Яндекс Музыки (опционально, для текстов и полного доступа):"
+            "Токен Яндекс Музыки (опционально):"
         ))
         self.token_input = QLineEdit()
         self.token_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -383,7 +393,7 @@ class YandexMusicOptionsPage(OptionsPage):
         layout.addWidget(self.token_input)
 
         self.use_isrc_cb = QCheckBox(
-            "Искать по ISRC в первую очередь (точнее, но не у всех треков есть ISRC)"
+            "Искать по ISRC в первую очередь"
         )
         layout.addWidget(self.use_isrc_cb)
 
@@ -400,17 +410,37 @@ class YandexMusicOptionsPage(OptionsPage):
         layout.addStretch()
 
     def load(self):
-        self.enabled_cb.setChecked(self.api.plugin_config.get("enabled", True))
+        try:
+            self.enabled_cb.setChecked(self.api.plugin_config["enabled"])
+        except KeyError:
+            self.enabled_cb.setChecked(True)
+            
         self.token_input.setText(self.api.plugin_config.get("token", ""))
-        self.use_isrc_cb.setChecked(self.api.plugin_config.get("use_isrc", True))
-        self.fetch_lyrics_cb.setChecked(self.api.plugin_config.get("fetch_lyrics", True))
-        self.fetch_genre_cb.setChecked(self.api.plugin_config.get("fetch_genre", True))
-        self.fetch_explicit_cb.setChecked(
-            self.api.plugin_config.get("fetch_explicit", True)
-        )
-        self.fetch_covers_cb.setChecked(
-            self.api.plugin_config.get("fetch_covers", True)
-        )
+        
+        try:
+            self.use_isrc_cb.setChecked(self.api.plugin_config["use_isrc"])
+        except KeyError:
+            self.use_isrc_cb.setChecked(True)
+            
+        try:
+            self.fetch_lyrics_cb.setChecked(self.api.plugin_config["fetch_lyrics"])
+        except KeyError:
+            self.fetch_lyrics_cb.setChecked(True)
+            
+        try:
+            self.fetch_genre_cb.setChecked(self.api.plugin_config["fetch_genre"])
+        except KeyError:
+            self.fetch_genre_cb.setChecked(True)
+            
+        try:
+            self.fetch_explicit_cb.setChecked(self.api.plugin_config["fetch_explicit"])
+        except KeyError:
+            self.fetch_explicit_cb.setChecked(True)
+            
+        try:
+            self.fetch_covers_cb.setChecked(self.api.plugin_config["fetch_cover"])
+        except KeyError:
+            self.fetch_covers_cb.setChecked(True)
 
     def save(self):
         self.api.plugin_config["enabled"] = self.enabled_cb.isChecked()
@@ -419,7 +449,7 @@ class YandexMusicOptionsPage(OptionsPage):
         self.api.plugin_config["fetch_lyrics"] = self.fetch_lyrics_cb.isChecked()
         self.api.plugin_config["fetch_genre"] = self.fetch_genre_cb.isChecked()
         self.api.plugin_config["fetch_explicit"] = self.fetch_explicit_cb.isChecked()
-        self.api.plugin_config["fetch_covers"] = self.fetch_covers_cb.isChecked()
+        self.api.plugin_config["fetch_cover"] = self.fetch_covers_cb.isChecked()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -427,22 +457,17 @@ class YandexMusicOptionsPage(OptionsPage):
 # ═══════════════════════════════════════════════════════════════════════
 
 def enable(api):
-    # Регистрируем опции с значениями по умолчанию
+    # --- ИСПРАВЛЕНО: Регистрация всех опций обязательна для Picard 3.x ---
     api.plugin_config.register_option("enabled", True)
     api.plugin_config.register_option("token", "")
     api.plugin_config.register_option("use_isrc", True)
-    api.plugin_config.register_option("fetch_lyrics", True)
     api.plugin_config.register_option("fetch_genre", True)
     api.plugin_config.register_option("fetch_explicit", True)
-    api.plugin_config.register_option("fetch_covers", True)
+    api.plugin_config.register_option("fetch_lyrics", True)
+    api.plugin_config.register_option("fetch_cover", True)
 
-    # Процессор метаданных треков (низкий приоритет — после основных плагинов)
+    api.register_options_page(YandexMusicOptionsPage)
+    api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    # Провайдер обложек
-    api.register_cover_art_provider(YandexMusicCoverProvider)
-
-    # Страница настроек
-    api.register_options_page(YandexMusicOptionsPage)
-
-    api.logger.info("Yandex Music Metadata plugin v0.2 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.3 loaded")
