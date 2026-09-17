@@ -42,16 +42,32 @@ def _build_headers(token=""):
 _rate_lock = threading.Lock()
 _last_request_time = 0.0
 _REQUEST_INTERVAL = 0.3
+_last_429_time = 0.0
+_RATE_LIMIT_BACKOFF = 5.0  # секунды ожидания после 429
 
 
 def _wait_for_rate_limit():
-    global _last_request_time
+    global _last_request_time, _last_429_time
     with _rate_lock:
+        # Адаптивный backoff после HTTP 429
+        if _last_429_time > 0:
+            elapsed = time.monotonic() - _last_429_time
+            if elapsed < _RATE_LIMIT_BACKOFF:
+                time.sleep(_RATE_LIMIT_BACKOFF - elapsed)
+                _last_429_time = 0.0
+                return
+
         elapsed = time.monotonic() - _last_request_time
         wait = _REQUEST_INTERVAL - elapsed
         if wait > 0:
             time.sleep(wait)
         _last_request_time = time.monotonic()
+
+
+def _record_rate_limit_hit():
+    global _last_429_time
+    with _rate_lock:
+        _last_429_time = time.monotonic()
 
 
 # ── Синхронный HTTP (для обложек) ───────────────────────────────────────
@@ -60,6 +76,9 @@ def _fetch_json_sync(url, timeout=10, token=""):
     _wait_for_rate_limit()
     req = urllib.request.Request(url, headers=_build_headers(token))
     with urllib.request.urlopen(req, timeout=timeout) as resp:
+        if resp.status == 429:
+            _record_rate_limit_hit()
+            raise urllib.error.HTTPError(url, 429, "Rate limited", {}, None)
         raw = resp.read()
     text = raw.decode("utf-8", errors="replace")
     return json.loads(text) if text.strip() else None
@@ -68,6 +87,7 @@ def _fetch_json_sync(url, timeout=10, token=""):
 # ── Асинхронный HTTP (для треков) ───────────────────────────────────────
 
 _active_fetchers = set()
+_active_fetchers_lock = threading.Lock()
 
 
 class _AsyncFetcher(QObject):
@@ -90,6 +110,10 @@ class _AsyncFetcher(QObject):
             _wait_for_rate_limit()
             req = urllib.request.Request(self._url, headers=_build_headers(self._token))
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                if resp.status == 429:
+                    _record_rate_limit_hit()
+                    self.fetched.emit(None, "HTTP 429: Rate limited")
+                    return
                 raw = resp.read()
             text = raw.decode("utf-8", errors="replace")
             if not text.strip():
@@ -110,14 +134,16 @@ class _AsyncFetcher(QObject):
             elif self._on_success:
                 self._on_success(data)
         finally:
-            _active_fetchers.discard(self)
+            with _active_fetchers_lock:
+                _active_fetchers.discard(self)
 
 
 def _fetch_json_async(url, on_success, on_error, timeout=15, token=""):
     fetcher = _AsyncFetcher(url, timeout=timeout,
                             on_success=on_success, on_error=on_error,
                             token=token)
-    _active_fetchers.add(fetcher)
+    with _active_fetchers_lock:
+        _active_fetchers.add(fetcher)
     fetcher.start()
 
 
@@ -149,7 +175,13 @@ def _extract_result(data):
 
 def _match_names(found_list, target):
     target = _normalize(target)
-    return any(target in f or f in target for f in found_list)
+    for f in found_list:
+        nf = _normalize(f)
+        if not nf:
+            continue
+        if target == nf or target in nf or nf in target:
+            return True
+    return False
 
 
 def _match_track(track_data, artist, title):
@@ -178,9 +210,7 @@ def _extract_cover_uri(album_data):
     cover = album_data.get("cover")
     if isinstance(cover, dict) and cover.get("uri"):
         return cover["uri"]
-    return (album_data.get("coverUri")
-            or album_data.get("ogImage")
-            or album_data.get("uri"))
+    return album_data.get("coverUri") or album_data.get("ogImage")
 
 
 def _cfg(api, key, default):
@@ -195,7 +225,7 @@ def _cfg(api, key, default):
 def _find_album(result, isrc, album_artist, album_title):
     if isrc:
         for track in result.get("tracks", {}).get("results", []):
-            albums = track.get("albums", [])
+            albums = track.get("albums") or []
             if not albums:
                 continue
             for a in albums:
@@ -207,7 +237,7 @@ def _find_album(result, isrc, album_artist, album_title):
             if _match_album(a, album_artist, album_title):
                 return a
         for track in result.get("tracks", {}).get("results", []):
-            for a in track.get("albums", []):
+            for a in track.get("albums") or []:
                 if _match_album(a, album_artist, album_title):
                     return a
     return None
@@ -267,7 +297,7 @@ def _handle_track_error(api, album, task_id, error):
     api.complete_album_task(album, task_id)
 
 
-def process_track(api, track, metadata, track_node, release_node=None):
+def process_track(api, track, metadata, track_node):
     if not _cfg(api, "enabled", True):
         return
 
