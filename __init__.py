@@ -56,7 +56,22 @@ def _wait_for_rate_limit():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Асинхронный HTTP-клиент
+#  Синхронный HTTP (для обложек)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _fetch_json_sync(url, timeout=10):
+    _wait_for_rate_limit()
+    req = urllib.request.Request(url, headers=YANDEX_HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    text = raw.decode("utf-8", errors="replace")
+    if not text.strip():
+        return None
+    return json.loads(text)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Асинхронный HTTP (для треков)
 # ═══════════════════════════════════════════════════════════════════════
 
 class _AsyncFetcher(QObject):
@@ -216,7 +231,7 @@ def _cfg(api, key, default):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Обработчик метаданных треков
+#  Обработчик треков (асинхронный — работает)
 # ═══════════════════════════════════════════════════════════════════════
 
 def _handle_track_search_result(api, album, metadata, task_id, artist, title,
@@ -329,7 +344,7 @@ def process_track(api, track, metadata, track_node, release_node=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Провайдер обложек
+#  Провайдер обложек (СИНХРОННЫЙ)
 # ═══════════════════════════════════════════════════════════════════════
 
 class YandexMusicCoverProvider(CoverArtProvider):
@@ -374,112 +389,78 @@ class YandexMusicCoverProvider(CoverArtProvider):
             search_type = "album"
 
         url = _build_search_url(search_query, search_type)
-
-        # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: блокирующая задача не даёт Picard
-        # финализировать альбом (и уничтожить _queue_generator)
-        # до тех пор, пока асинхронный колбэк не вызовет complete_album_task.
-        cover_task_id = "ya_cover_search"
-        self.api.add_album_task(
-            self.album, cover_task_id,
-            f"Yandex Music: поиск обложки для «{album_title}»",
-            blocking=True,
-        )
-
         self.api.logger.debug(
             f"Yandex Music: поиск обложки для «{search_query}» "
             f"(тип: {search_type})"
         )
 
-        _fetch_json_async(
-            url,
-            on_success=partial(self._handle_cover_search, formatted_isrc, cover_task_id),
-            on_error=partial(self._handle_cover_error, cover_task_id),
-        )
-
-        return 1
-
-    def _handle_cover_search(self, isrc, task_id, data):
+        # СИНХРОННЫЙ запрос — как в Amazon-плагине.
+        # Блокирует главный поток на ~300мс, но гарантирует,
+        # что queue_put и return FINISHED отработают до
+        # уничтожения _queue_generator.
         try:
-            if not data:
-                self.next_in_queue()
-                return
-
-            result = _extract_result(data)
-
-            album_artist = (
-                self.metadata.get("albumartist", "")
-                or self.metadata.get("artist", "")
-            )
-            album_title = self.metadata.get("album", "")
-
-            matched_album = None
-
-            if isrc:
-                tracks = result.get("tracks", {}).get("results", [])
-                for track_data in tracks:
-                    track_albums = track_data.get("albums", [])
-                    if track_albums:
-                        for ta in track_albums:
-                            if _match_album(ta, album_artist, album_title):
-                                matched_album = ta
-                                break
-                        if not matched_album:
-                            matched_album = track_albums[0]
-                        break
-            else:
-                albums = result.get("albums", {}).get("results", [])
-                for album_data in albums:
-                    if _match_album(album_data, album_artist, album_title):
-                        matched_album = album_data
-                        break
-
-                if not matched_album:
-                    tracks = result.get("tracks", {}).get("results", [])
-                    for track_data in tracks:
-                        for ta in track_data.get("albums", []):
-                            if _match_album(ta, album_artist, album_title):
-                                matched_album = ta
-                                break
-                        if matched_album:
-                            break
-
-            if not matched_album:
-                self.api.logger.debug(
-                    f"Yandex Music: альбом не найден для "
-                    f"«{album_artist} — {album_title}»"
-                )
-                self.next_in_queue()
-                return
-
-            cover_uri = _extract_cover_uri(matched_album)
-            if not cover_uri:
-                self.next_in_queue()
-                return
-
-            cover_url = _build_cover_url(cover_uri, "1000x1000")
-            if cover_url:
-                self.api.logger.info(
-                    f"Yandex Music: обложка найдена — {cover_url}"
-                )
-                self.queue_put(CoverArtImage(cover_url))
-            self.next_in_queue()
-
+            data = _fetch_json_sync(url, timeout=10)
         except Exception as e:
             self.api.logger.error(
-                f"Yandex Music: ошибка обработки обложки — {e}"
+                f"Yandex Music: ошибка поиска обложки — {e}"
             )
-            self.next_in_queue()
-        finally:
-            self.api.complete_album_task(self.album, task_id)
+            return CoverArtProvider.FINISHED
 
-    def _handle_cover_error(self, task_id, error):
-        try:
-            self.api.logger.error(
-                f"Yandex Music: ошибка загрузки обложки — {error}"
+        if not data:
+            return CoverArtProvider.FINISHED
+
+        result = _extract_result(data)
+
+        matched_album = None
+
+        if formatted_isrc:
+            tracks = result.get("tracks", {}).get("results", [])
+            for track_data in tracks:
+                track_albums = track_data.get("albums", [])
+                if track_albums:
+                    for ta in track_albums:
+                        if _match_album(ta, album_artist, album_title):
+                            matched_album = ta
+                            break
+                    if not matched_album:
+                        matched_album = track_albums[0]
+                    break
+        else:
+            albums = result.get("albums", {}).get("results", [])
+            for album_data in albums:
+                if _match_album(album_data, album_artist, album_title):
+                    matched_album = album_data
+                    break
+
+            if not matched_album:
+                tracks = result.get("tracks", {}).get("results", [])
+                for track_data in tracks:
+                    for ta in track_data.get("albums", []):
+                        if _match_album(ta, album_artist, album_title):
+                            matched_album = ta
+                            break
+                    if matched_album:
+                        break
+
+        if not matched_album:
+            self.api.logger.debug(
+                f"Yandex Music: альбом не найден для "
+                f"«{album_artist} — {album_title}»"
             )
-            self.next_in_queue()
-        finally:
-            self.api.complete_album_task(self.album, task_id)
+            return CoverArtProvider.FINISHED
+
+        cover_uri = _extract_cover_uri(matched_album)
+        if not cover_uri:
+            return CoverArtProvider.FINISHED
+
+        cover_url = _build_cover_url(cover_uri, "1000x1000")
+        if cover_url:
+            self.api.logger.info(
+                f"Yandex Music: обложка найдена — {cover_url}"
+            )
+            self.queue_put(CoverArtImage(cover_url))
+
+        return CoverArtProvider.FINISHED
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -555,4 +536,4 @@ def enable(api):
     api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    api.logger.info("Yandex Music Metadata plugin v0.15 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.16 loaded")
