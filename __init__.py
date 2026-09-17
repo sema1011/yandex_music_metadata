@@ -19,7 +19,7 @@ from picard.plugin3.api import (
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Заголовки для запросов к API Яндекс Музыки
+#  Заголовки
 # ═══════════════════════════════════════════════════════════════════════
 
 YANDEX_HEADERS = {
@@ -34,15 +34,10 @@ YANDEX_HEADERS = {
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Глобальное хранилище ссылок на активные fetcher'ы (защита от GC)
+#  GC-защита и rate limiter
 # ═══════════════════════════════════════════════════════════════════════
 
 _active_fetchers = set()
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Ограничитель частоты запросов (защита от HTTP 429)
-# ═══════════════════════════════════════════════════════════════════════
 
 _rate_lock = threading.Lock()
 _last_request_time = 0.0
@@ -61,7 +56,7 @@ def _wait_for_rate_limit():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Асинхронный HTTP-клиент на сигналах Qt (потокобезопасный)
+#  Асинхронный HTTP-клиент
 # ═══════════════════════════════════════════════════════════════════════
 
 class _AsyncFetcher(QObject):
@@ -82,7 +77,6 @@ class _AsyncFetcher(QObject):
     def _worker(self):
         try:
             _wait_for_rate_limit()
-
             if self._is_json:
                 headers = YANDEX_HEADERS
             else:
@@ -91,12 +85,10 @@ class _AsyncFetcher(QObject):
                     "Accept": "image/*",
                     "Accept-Encoding": "identity",
                 }
-
             req = urllib.request.Request(self._url, headers=headers)
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 status = resp.status
                 raw = resp.read()
-
                 if self._is_json:
                     text = raw.decode("utf-8", errors="replace")
                     if not text.strip():
@@ -106,10 +98,7 @@ class _AsyncFetcher(QObject):
                         data = json.loads(text)
                     except json.JSONDecodeError as e:
                         snippet = text[:300].replace("\n", "\\n")
-                        self.fetched.emit(
-                            None,
-                            f"Ошибка JSON: {e} | HTTP {status} | ответ: {snippet}"
-                        )
+                        self.fetched.emit(None, f"Ошибка JSON: {e} | HTTP {status} | ответ: {snippet}")
                         return
                     self.fetched.emit(data, None)
                 else:
@@ -135,10 +124,8 @@ class _AsyncFetcher(QObject):
 
 
 def _fetch_json_async(url, on_success, on_error, timeout=15):
-    fetcher = _AsyncFetcher(
-        url, is_json=True, timeout=timeout,
-        on_success=on_success, on_error=on_error,
-    )
+    fetcher = _AsyncFetcher(url, is_json=True, timeout=timeout,
+                            on_success=on_success, on_error=on_error)
     _active_fetchers.add(fetcher)
     fetcher.start()
     return fetcher
@@ -237,7 +224,6 @@ def _handle_track_search_result(api, album, metadata, task_id, artist, title,
     try:
         if not data:
             return
-
         result = _extract_result(data)
         tracks = result.get("tracks", {}).get("results", [])
         if not tracks:
@@ -287,7 +273,6 @@ def _handle_track_search_result(api, album, metadata, task_id, artist, title,
             f"Yandex Music: теги добавлены для «{artist} — {title}»"
             f" (по ISRC: {'да' if isrc else 'нет'})"
         )
-
     finally:
         api.complete_album_task(album, task_id)
 
@@ -305,7 +290,6 @@ def process_track(api, track, metadata, track_node, release_node=None):
 
     title = metadata.get("title", "")
     artist = metadata.get("artist", "")
-
     if not title or not artist:
         return
 
@@ -390,6 +374,17 @@ class YandexMusicCoverProvider(CoverArtProvider):
             search_type = "album"
 
         url = _build_search_url(search_query, search_type)
+
+        # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: блокирующая задача не даёт Picard
+        # финализировать альбом (и уничтожить _queue_generator)
+        # до тех пор, пока асинхронный колбэк не вызовет complete_album_task.
+        cover_task_id = "ya_cover_search"
+        self.api.add_album_task(
+            self.album, cover_task_id,
+            f"Yandex Music: поиск обложки для «{album_title}»",
+            blocking=True,
+        )
+
         self.api.logger.debug(
             f"Yandex Music: поиск обложки для «{search_query}» "
             f"(тип: {search_type})"
@@ -397,13 +392,13 @@ class YandexMusicCoverProvider(CoverArtProvider):
 
         _fetch_json_async(
             url,
-            on_success=partial(self._handle_cover_search, formatted_isrc),
-            on_error=self._handle_cover_error,
+            on_success=partial(self._handle_cover_search, formatted_isrc, cover_task_id),
+            on_error=partial(self._handle_cover_error, cover_task_id),
         )
 
         return 1
 
-    def _handle_cover_search(self, isrc, data):
+    def _handle_cover_search(self, isrc, task_id, data):
         try:
             if not data:
                 self.next_in_queue()
@@ -466,9 +461,6 @@ class YandexMusicCoverProvider(CoverArtProvider):
                 self.api.logger.info(
                     f"Yandex Music: обложка найдена — {cover_url}"
                 )
-                # ИСПРАВЛЕНО: передаём URL строки в CoverArtImage,
-                # Picard сам скачает изображение через свой web service.
-                # Раньше передавали bytes, что ломало QUrl конструктор.
                 self.queue_put(CoverArtImage(cover_url))
             self.next_in_queue()
 
@@ -477,14 +469,17 @@ class YandexMusicCoverProvider(CoverArtProvider):
                 f"Yandex Music: ошибка обработки обложки — {e}"
             )
             self.next_in_queue()
+        finally:
+            self.api.complete_album_task(self.album, task_id)
 
-    def _handle_cover_error(self, error):
+    def _handle_cover_error(self, task_id, error):
         try:
             self.api.logger.error(
                 f"Yandex Music: ошибка загрузки обложки — {error}"
             )
-        finally:
             self.next_in_queue()
+        finally:
+            self.api.complete_album_task(self.album, task_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -560,4 +555,4 @@ def enable(api):
     api.register_cover_art_provider(YandexMusicCoverProvider)
     api.register_track_metadata_processor(process_track, priority=-50)
 
-    api.logger.info("Yandex Music Metadata plugin v0.14 loaded")
+    api.logger.info("Yandex Music Metadata plugin v0.15 loaded")
